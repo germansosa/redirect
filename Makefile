@@ -17,7 +17,7 @@
 
 all: push
 
-TAG=1.0
+TAG=${TRAVIS_TAG}
 PREFIX?=gsosa/redirect
 ARCH?=amd64
 GOLANG_VERSION=1.7
@@ -32,11 +32,12 @@ container:
 	docker run --rm -it -v $(PWD):/go/src/redirect golang:$(GOLANG_VERSION) /bin/bash -c "make -C /go/src/redirect server ARCH=$(ARCH)"
 
 build:
-	docker build --pull -t $(PREFIX):$(TAG) .
+	docker build --pull -t $(PREFIX):$(TAG) -t $(PREFIX):latest .
 
 push: server build
 	docker login -u="$(DOCKER_USERNAME)" -p="$(DOCKER_PASSWORD)"
 	docker push $(PREFIX):$(TAG)
+	docker push $(PREFIX):latest
 
 clean:
 	rm -f server
