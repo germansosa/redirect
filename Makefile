@@ -20,7 +20,7 @@ all: push
 TAG=${TRAVIS_TAG}
 PREFIX?=gsosa/redirect
 ARCH?=amd64
-GOLANG_VERSION=1.7
+GOLANG_VERSION=1.8
 TEMP_DIR:=$(shell mktemp -d)
 
 server: server.go

@@ -16,11 +16,15 @@ limitations under the License.
 package main
 
 import (
-	"github.com/namsral/flag"
+	"context"
 	"fmt"
+	"github.com/namsral/flag"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -35,18 +39,32 @@ func init() {
 
 func main() {
 	fs := flag.NewFlagSetWithEnvPrefix(os.Args[0], "REDIRECT", flag.ExitOnError)
+
 	port := fs.Int("port", 8080, "Port number to listen.")
-	dest := fs.String("dest", "http://127.0.0.1/", "Destination url.")
-	code := fs.Int("code", 301, "Status code. The provided code should be in the 3xx range.")
-	auri := fs.Bool("auri", false, "Append request URI to destination url.")
+	metricsPort := fs.Int("metrics-port", 9237, "Port number to serve metrics at /metrics.")
+	redirectTo := fs.String("redirect-to", "", "Destination url.")
+	statusCode := fs.Int("status-code", 301, "Status code. The provided code should be in the 3xx range.")
+	appendURI := fs.Bool("append-uri", false, "Append request URI to destination url.")
+
 	fs.Parse(os.Args[1:])
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	if len(*redirectTo) == 0 {
+		fmt.Println("-redirect-to is required.")
+		os.Exit(1)
+	}
+
+	if *appendURI == true {
+		// Remove trailing slash if exists
+		*redirectTo = strings.TrimSuffix(*redirectTo, "/")
+	}
+
+	redirectMux := http.NewServeMux()
+	redirectMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		if *auri == true {
-			http.Redirect(w, r, *dest + r.RequestURI, *code)
+		if *appendURI == true {
+			http.Redirect(w, r, *redirectTo+r.RequestURI, *statusCode)
 		} else {
-			http.Redirect(w, r, *dest, *code)
+			http.Redirect(w, r, *redirectTo, *statusCode)
 		}
 
 		duration := time.Now().Sub(start).Seconds() * 1e3
@@ -57,16 +75,44 @@ func main() {
 		requestCount.WithLabelValues(proto).Inc()
 		requestDuration.WithLabelValues(proto).Observe(duration)
 	})
-	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+	redirectMux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, "ok")
 	})
-	http.Handle("/metrics", promhttp.Handler())
-	// TODO: Use .Shutdown from Go 1.8
-        fmt.Printf("Serving on port %d. Redirecting to %s with status code %d\n", *port, *dest, *code)
-	err := http.ListenAndServe(fmt.Sprintf(":%d", *port), nil)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "could not start http server: %s\n", err)
-		os.Exit(1)
-	}
+
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", promhttp.Handler())
+
+	redirectSrv := &http.Server{Addr: fmt.Sprintf(":%d", *port), Handler: redirectMux}
+	metricsSrv := &http.Server{Addr: fmt.Sprintf(":%d", *metricsPort), Handler: metricsMux}
+
+	go func() {
+		// Main http server
+		err := redirectSrv.ListenAndServe()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "could not start http server: %s\n", err)
+		}
+	}()
+
+	go func() {
+		// Serving metrics
+		err := metricsSrv.ListenAndServe()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "could not start http server for metrics: %s\n", err)
+		}
+	}()
+
+	fmt.Printf("Serving on port %d. Redirecting to %s with status code %d\n", *port, *redirectTo, *statusCode)
+
+	// Wait for end signal
+	stopChan := make(chan os.Signal, 1)
+	signal.Notify(stopChan, syscall.SIGTERM)
+	// Block until SIGTERM is received.
+	<-stopChan
+	fmt.Println("Received SIGTERM, shutting down")
+
+	// shut down gracefully, but wait no longer than 5 seconds before halting
+	ctx, _ := context.WithTimeout(context.Background(), 5*time.Second)
+	redirectSrv.Shutdown(ctx)
+	metricsSrv.Shutdown(ctx)
 }
